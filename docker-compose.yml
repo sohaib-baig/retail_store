@@ -1,0 +1,277 @@
+version: "3.9"
+
+services:
+
+  # ----------------------------------------------------
+  # 1. CATALOG + MariaDB
+  # ----------------------------------------------------
+  catalog:
+    image: ghcr.io/sohaib-baig/catalog
+    build:
+      context: ./src/catalog
+    hostname: catalog
+    restart: always
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: ["NET_BIND_SERVICE"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid
+    environment:
+      - RETAIL_CATALOG_PERSISTENCE_PROVIDER=mariadb
+      - RETAIL_CATALOG_PERSISTENCE_ENDPOINT=catalog-db:3306
+      - RETAIL_CATALOG_PERSISTENCE_NAME=catalog
+      - RETAIL_CATALOG_PERSISTENCE_USERNAME=catalog_user
+      - RETAIL_CATALOG_PERSISTENCE_PASSWORD=secret
+    depends_on:
+      catalog-db:
+        condition: service_healthy
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 10s
+      retries: 3
+
+  catalog-db:
+    image: mariadb:10.9
+    restart: always
+    environment:
+      - MARIADB_DATABASE=catalog
+      - MARIADB_USER=catalog_user
+      - MARIADB_PASSWORD=secret
+      - MARIADB_ROOT_PASSWORD=secret
+    volumes:
+      - catalog_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-psecret"]
+      interval: 5s
+      retries: 20
+
+
+  # ----------------------------------------------------
+  # 2. CART + DynamoDB Local
+  # ----------------------------------------------------
+  cart:
+    image: ghcr.io/sohaib-baig/cart
+    build:
+      context: ./src/cart
+    hostname: cart
+    restart: always
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: ["NET_BIND_SERVICE"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid
+    environment:
+    
+      - SERVER_TOMCAT_ACCESSLOG_ENABLED=true
+      #- RETAIL_CART_PERSISTENCE_PROVIDER=memory
+      - RETAIL_CART_PERSISTENCE_PROVIDER=dynamodb
+      - RETAIL_CART_PERSISTENCE_DYNAMODB_ENDPOINT=http://cart-dynamodb:8000
+      - RETAIL_CART_PERSISTENCE_DYNAMODB_CREATE_TABLE=true
+      - AWS_ACCESS_KEY_ID=dummy
+      - AWS_SECRET_ACCESS_KEY=dummy
+    depends_on:
+     cart-dynamodb:
+        condition: service_healthy
+    ports:
+      - "8082:8080"
+    healthcheck:
+      test:
+        ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    
+
+  cart-dynamodb:
+    image: amazon/dynamodb-local:1.20.0
+    hostname: cart-dynamodb
+    restart: always
+    cap_drop:
+      - all
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid
+    healthcheck:
+      test: ["CMD-SHELL", "exit 0"]
+      interval: 5s
+      timeout: 15s
+      retries: 3
+
+
+  # ----------------------------------------------------
+  # 3. CHECKOUT + Redis
+  # ----------------------------------------------------
+  checkout:
+    image: ghcr.io/sohaib-baig/checkout
+    build:
+      context: ./src/checkout
+    hostname: checkout
+    restart: always
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: ["NET_BIND_SERVICE"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid
+    environment:
+      - RETAIL_CHECKOUT_PERSISTENCE_PROVIDER=redis
+      - RETAIL_CHECKOUT_PERSISTENCE_REDIS_URL=redis://checkout-redis:6379
+    ports:
+      - "8085:8080"
+    depends_on:
+      checkout-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 10s
+      retries: 3
+
+  checkout-redis:
+    image: redis:6.0-alpine
+    hostname: checkout-redis
+    restart: always
+    ports:
+      - "6370:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      retries: 30
+
+
+  # ----------------------------------------------------
+  # 4. ORDERS + PostgreSQL + RabbitMQ
+  # ----------------------------------------------------
+  orders:
+    image: ghcr.io/sohaib-baig/orders
+    build:
+      context: ./src/orders
+    hostname: orders
+    restart: always
+    mem_limit: 512m
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: ["NET_BIND_SERVICE"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid
+    environment:
+      - SERVER_TOMCAT_ACCESSLOG_ENABLED=true
+      - RETAIL_ORDERS_PERSISTENCE_PROVIDER=postgres
+      - RETAIL_ORDERS_PERSISTENCE_ENDPOINT=orders-db:5432
+      - RETAIL_ORDERS_PERSISTENCE_NAME=orders
+      - RETAIL_ORDERS_PERSISTENCE_USERNAME=orders_user
+      - RETAIL_ORDERS_PERSISTENCE_PASSWORD=secret
+      - RETAIL_ORDERS_MESSAGING_PROVIDER=rabbitmq
+      - RETAIL_ORDERS_MESSAGING_RABBITMQ_ADDRESSES=rabbitmq:5672
+      - RETAIL_ORDERS_MESSAGING_RABBITMQ_USERNAME=rabbitmq
+      - RETAIL_ORDERS_MESSAGING_RABBITMQ_PASSWORD=secret
+    depends_on:
+      orders-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "8083:8080"
+    healthcheck:
+      # test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      # interval: 10s
+      # retries: 3 
+     test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+     interval: 10s
+     timeout: 5s
+     retries: 5
+     start_period: 15s
+
+
+  orders-db:
+    image: postgres:16.1
+    hostname: orders-db
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - reschedule=on-node-failure
+      - POSTGRES_DB=orders
+      - POSTGRES_USER=orders_user
+      - POSTGRES_PASSWORD=secret
+    volumes:
+      - orders_data:/var/lib/postgresql/data
+    healthcheck:
+      # test: ["CMD", "pg_isready", "-U", "orders_user"]
+      # interval: 5s
+      # retries: 20
+      test: ["CMD-SHELL", "pg_isready -d orders -U orders_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    
+    # ports:
+    #   - "5432:5432"
+    
+  rabbitmq:
+    image: rabbitmq:3-management
+    restart: always
+    environment:
+      - RABBITMQ_DEFAULT_USER=rabbitmq
+      - RABBITMQ_DEFAULT_PASS=secret
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 5s
+      retries: 20
+
+
+  # ----------------------------------------------------
+  # 5. UI (Gateway + Frontend)
+  # ----------------------------------------------------
+  ui:
+    image: ghcr.io/sohaib-baig/ui
+    build:
+      context: ./src/ui
+    hostname: ui
+    restart: always
+    mem_limit: 512m
+    cap_drop: [ALL]
+    environment:
+      - JAVA_OPTS=-XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/urandom
+      - SERVER_TOMCAT_ACCESSLOG_ENABLED=true
+      # internal service URLs
+      - ORDERS_URL=http://orders:8080
+      - CART_URL=http://cart:8080
+      - CATALOG_URL=http://catalog:8080
+      - CHECKOUT_URL=http://checkout:8080
+    depends_on:
+      orders:
+        condition: service_healthy
+      cart:
+        condition: service_healthy
+      catalog:
+        condition: service_healthy
+      checkout:
+        condition: service_healthy
+    ports:
+      - "8888:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "echo 0"]
+      #test:
+      #  [
+       #   "CMD-SHELL",
+        #  "curl -s -f http://localhost:8080/actuator/health || exit 1",
+       # ]
+      #interval: 10s
+      #timeout: 10s
+      #retries: 3
+      #start_period: 15s
+
+volumes:
+  catalog_data:
+  orders_data:
